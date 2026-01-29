@@ -3,107 +3,117 @@ import yfinance as yf
 import pandas as pd
 import plotly.express as px
 
-# 1. Configurações de Interface
-st.set_page_config(page_title="Wealth Command Center Pro", layout="wide")
+# 1. Configurações de Interface (Otimizado para Desktop)
+st.set_page_config(page_title="Wealth Management Command Center", layout="wide")
 
-# 2. Função de Busca de Dados com Proteção de Colunas
+# 2. Função de Busca de Dados Global
 @st.cache_data(ttl=600)
-def get_data(tickers):
+def buscar_mercado(tickers):
     try:
-        tickers_limpos = list(set([str(t).strip().upper() for t in tickers if t and t != "CDB"]))
-        if not tickers_limpos: return pd.Series()
+        # Limpa e filtra tickers vazios
+        lista = list(set([str(t).strip().upper() for t in tickers if t]))
+        if not lista: return pd.Series()
         
-        all_tickers = tickers_limpos + ['USDBRL=X']
+        # Adiciona o dólar para conversão automática
+        all_tickers = lista + ['USDBRL=X']
         df_raw = yf.download(all_tickers, period="5d", progress=False)
         
         if df_raw.empty: return pd.Series()
-
-        # Tenta Adj Close, senão Close, senão ignora (evita KeyError)
-        if 'Adj Close' in df_raw.columns:
-            df_precos = df_raw['Adj Close']
-        elif 'Close' in df_raw.columns:
-            df_precos = df_raw['Close']
-        else:
-            return pd.Series()
-            
-        return df_precos.ffill().iloc[-1]
+        
+        # Prioriza 'Adj Close' para precisão (dividendos inclusos)
+        precos = df_raw['Adj Close'] if 'Adj Close' in df_raw.columns else df_raw['Close']
+        return precos.ffill().iloc[-1]
     except Exception:
         return pd.Series()
 
 # --- TELA PRINCIPAL ---
-st.title("🚀 Strategic Wealth Command Center")
+st.title("🚀 Wealth Management Command Center")
+st.markdown("---")
 
-# 3. Inicialização da Carteira (Consolidando seus dados reais)
-if 'portfolio' not in st.session_state:
-    st.session_state.portfolio = pd.DataFrame([
-        {"Ativo": "ITUB3.SA", "Qtd": 920.0, "Alvo": 10.0, "Custo": 28000.0},
-        {"Ativo": "GOAU4.SA", "Qtd": 800.0, "Alvo": 10.0, "Custo": 35000.0},
-        {"Ativo": "CDB", "Qtd": 1.0, "Alvo": 50.0, "Custo": 600000.0},
-        {"Ativo": "IAUM", "Qtd": 260.0, "Alvo": 5.0, "Custo": 26000.0},
-        {"Ativo": "SCHD", "Qtd": 60.0, "Alvo": 5.0, "Custo": 25000.0},
-        {"Ativo": "BTC-USD", "Qtd": 0.05, "Alvo": 5.0, "Custo": 15000.0}
-    ])
+# 3. Gerenciamento de Dados (Inicia vazio como solicitado)
+if 'meus_ativos' not in st.session_state:
+    st.session_state.meus_ativos = pd.DataFrame(columns=['Ativo', 'Qtd', 'Custo Inicial', 'Alvo %'])
 
-# --- BARRA LATERAL ---
+# --- BARRA LATERAL: ENTRADA DE DADOS ---
 with st.sidebar:
-    st.header("⚙️ Gestão de Ativos")
-    with st.form("novo_ativo"):
-        t_in = st.text_input("Ticker").upper().strip()
-        q_in = st.number_input("Quantidade", min_value=0.0, format="%.8f", step=0.000001)
-        c_in = st.number_input("Custo Total (R$)", min_value=0.0)
-        a_in = st.number_input("Alvo %", min_value=0.0, max_value=100.0)
+    st.header("📥 Adicionar Novo Ativo")
+    st.info("BR: .SA (ex: ITUB3.SA)\nEUA: Ticker (ex: AAPL)\nCripto: -USD (ex: BTC-USD)")
+    
+    with st.form("cadastro_ativo"):
+        ticker = st.text_input("Código do Ativo").upper().strip()
+        qtd = st.number_input("Quantidade (Unidades)", min_value=0.0, format="%.8f", step=0.000001)
+        custo = st.number_input("Valor Inicial Investido (R$ Total)", min_value=0.0, step=100.0)
+        alvo = st.number_input("Alvo desejado (%) na carteira", min_value=0.0, max_value=100.0)
         
-        if st.form_submit_button("Guardar"):
-            if t_in:
-                if len(t_in) >= 5 and t_in[-1].isdigit() and ".SA" not in t_in: t_in += ".SA"
-                nova_linha = pd.DataFrame([{"Ativo": t_in, "Qtd": q_in, "Alvo": a_in, "Custo": c_in}])
-                st.session_state.portfolio = pd.concat([st.session_state.portfolio, nova_linha], ignore_index=True)
+        if st.form_submit_button("Adicionar Ativo"):
+            if ticker:
+                novo_item = pd.DataFrame([{"Ativo": ticker, "Qtd": qtd, "Custo Inicial": custo, "Alvo %": alvo}])
+                st.session_state.meus_ativos = pd.concat([st.session_state.meus_ativos, novo_item], ignore_index=True)
                 st.rerun()
+    
+    if st.button("🗑️ Limpar Carteira"):
+        st.session_state.meus_ativos = pd.DataFrame(columns=['Ativo', 'Qtd', 'Custo Inicial', 'Alvo %'])
+        st.rerun()
 
-# --- PROCESSAMENTO SEGURO ---
-df_p = st.session_state.portfolio.copy()
-precos_atuais = get_data(df_p['Ativo'].tolist())
-cotacao_dolar = precos_atuais.get('USDBRL=X', 5.20)
+# --- PROCESSAMENTO E EXIBIÇÃO ---
+df = st.session_state.meus_ativos.copy()
 
-# Mapeamento de preços sem falhas
-df_p['Preço Unit.'] = df_p.apply(lambda r: r['Custo'] if r['Ativo'] == "CDB" else precos_atuais.get(r['Ativo'], 0), axis=1)
+if not df.empty:
+    precos_vivos = buscar_mercado(df['Ativo'].tolist())
+    dolar = precos_vivos.get('USDBRL=X', 5.00) # Valor de segurança
 
-def converter_valor(row):
-    if row['Ativo'] == "CDB": return row['Custo']
-    p, q = float(row['Preço Unit.']), float(row['Qtd'])
-    if p == 0: return row['Custo'] # Evita zerar se a API falhar
-    return p * q if ".SA" in str(row['Ativo']) else p * q * float(cotacao_dolar)
+    # Mapeamento de preços e cálculos
+    df['Preço Mercado'] = df['Ativo'].map(precos_vivos)
+    
+    def calc_valor_atual(row):
+        p = float(row['Preço Mercado']) if pd.notnull(row['Preço Mercado']) else 0
+        q = float(row['Qtd'])
+        # Conversão BRL/USD
+        return p * q if ".SA" in str(row['Ativo']) else p * q * float(dolar)
 
-df_p['Valor Atual (R$)'] = df_p.apply(converter_valor, axis=1)
-patrimonio_total = df_p['Valor Atual (R$)'].sum()
+    df['Valor Atual (R$)'] = df.apply(calc_valor_atual, axis=1)
+    
+    # Métricas de Performance
+    patrimonio_total = df['Valor Atual (R$)'].sum()
+    investimento_total = df['Custo Inicial'].sum()
+    lucro_total = patrimonio_total - investimento_total
+    
+    # KPIs no topo
+    kpi1, kpi2, kpi3 = st.columns(3)
+    kpi1.metric("Patrimônio Atual", f"R$ {patrimonio_total:,.2f}")
+    kpi2.metric("Investimento Total", f"R$ {investimento_total:,.2f}")
+    kpi3.metric("Lucro/Prejuízo Total", f"R$ {lucro_total:,.2f}", f"{(lucro_total/investimento_total*100):.2f}%" if investimento_total > 0 else "0%")
 
-# Cálculo de Rentabilidade com proteção contra divisão por zero
-df_p['Rentab. R$'] = df_p['Valor Atual (R$)'] - df_p['Custo']
-df_p['Rentab. %'] = (df_p['Rentab. R$'] / df_p['Custo'].replace(0, 1)) * 100
-df_p['Atual %'] = (df_p['Valor Atual (R$)'] / patrimonio_total) * 100
-df_p['Desvio %'] = df_p['Atual %'] - df_p['Alvo']
+    st.markdown("---")
 
-# --- INTERFACE ---
-st.metric("Património Total", f"R$ {patrimonio_total:,.2f}")
+    # Abas de visualização
+    aba_graf, aba_perf = st.tabs(["📊 Distribuição", "📈 Performance Detalhada"])
 
-aba1, aba2 = st.tabs(["📊 Alocação", "📈 Performance"])
+    with aba_graf:
+        col_pie, col_reb = st.columns([1, 1.2])
+        with col_pie:
+            fig = px.pie(df, values='Valor Atual (R$)', names='Ativo', hole=0.5, title="Alocação por Ativo")
+            st.plotly_chart(fig, use_container_width=True)
+        with col_reb:
+            df['Atual %'] = (df['Valor Atual (R$)'] / patrimonio_total) * 100
+            df['Desvio %'] = df['Atual %'] - df['Alvo %']
+            st.write("### Sugestão de Rebalanceamento")
+            st.dataframe(df[['Ativo', 'Atual %', 'Alvo %', 'Desvio %']].style.format("{:.2f}%"))
 
-with aba1:
-    col_a, col_b = st.columns(2)
-    with col_a:
-        fig = px.pie(df_p, values='Valor Atual (R$)', names='Ativo', hole=0.5)
-        st.plotly_chart(fig, use_container_width=True)
-    with col_b:
-        # fillna(0) impede o ValueError na exibição
-        st.dataframe(df_p[['Ativo', 'Atual %', 'Alvo', 'Desvio %']].fillna(0).style.format("{:.2f}%"))
+    with aba_perf:
+        st.write("### Análise de Rendimento Individual")
+        df['Rend. R$'] = df['Valor Atual (R$)'] - df['Custo Inicial']
+        df['Rend. %'] = (df['Rend. R$'] / df['Custo Inicial'].replace(0, 1)) * 100
+        
+        # Tabela completa
+        df_show = df[['Ativo', 'Qtd', 'Custo Inicial', 'Valor Atual (R$)', 'Rend. R$', 'Rend. %']]
+        st.dataframe(df_show.style.format({
+            'Qtd': '{:.6f}',
+            'Custo Inicial': 'R$ {:,.2f}',
+            'Valor Atual (R$)': 'R$ {:,.2f}',
+            'Rend. R$': 'R$ {:,.2f}',
+            'Rend. %': '{:.2f}%'
+        }), use_container_width=True)
 
-with aba2:
-    st.write("### Desempenho dos Ativos")
-    # Tabela de performance com proteção contra valores vazios
-    df_perf = df_p[['Ativo', 'Qtd', 'Custo', 'Valor Atual (R$)', 'Rentab. %']].fillna(0)
-    st.dataframe(df_perf.style.format({
-        'Qtd': '{:.4f}', 
-        'Custo': 'R$ {:,.2f}', 
-        'Valor Atual (R$)': 'R$ {:,.2f}', 
-        'Rentab. %': '{:.2f}%'
-    }))
+else:
+    st.info("Sua carteira está vazia. Adicione seu primeiro ativo na barra lateral esquerda!")
